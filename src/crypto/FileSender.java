@@ -2,7 +2,6 @@ package crypto;
 
 import ui.UILogger;
 
-import javax.crypto.SecretKey;
 import java.io.*;
 import java.net.Socket;
 import java.nio.file.Files;
