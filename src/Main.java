@@ -4,7 +4,8 @@
 
 public class Main {
     public static void main(String[] args) {
-        crypto.KeyManager.generateKeys();
+        // No need to call generateKeys(), KeyManager initializes keys automatically
+
         new Thread(ui.ReceiverUI::createReceiverUI).start();
         javax.swing.SwingUtilities.invokeLater(ui.SenderUI::createSenderUI);
     }

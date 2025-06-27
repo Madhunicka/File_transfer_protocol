@@ -2,60 +2,115 @@ package crypto;
 
 import ui.UILogger;
 
+import javax.crypto.SecretKey;
+import javax.crypto.spec.SecretKeySpec;
 import java.io.*;
 import java.net.Socket;
 import java.nio.file.Files;
-import java.security.SecureRandom;
+import java.security.*;
 import java.util.Base64;
 
 public class FileSender {
+
     public static void sendFile(File inputFile, UILogger logger) {
         try (Socket socket = new Socket("localhost", 6000);
              DataOutputStream dos = new DataOutputStream(socket.getOutputStream())) {
 
-            byte[] fileBytes = Files.readAllBytes(inputFile.toPath());
-            logger.log("[Sender] Original file content: " + new String(fileBytes));
-            logger.log("[Sender] Original file (Base64): " + Base64.getEncoder().encodeToString(fileBytes));
+            logger.log("[Sender] Starting file send process...");
 
-            byte[] iv = new byte[16];
-            new SecureRandom().nextBytes(iv);
-            byte[] nonce = new byte[16];
+            //Generate ephemeral ECDH key pair
+            KeyPair ephemeralKeyPair = CryptoUtils.generateECDHKeyPair();
+            logger.log("[Sender] Ephemeral EC key pair generated.");
+            logger.log("[Sender] Ephemeral Public Key (Base64): " + Base64.getEncoder().encodeToString(ephemeralKeyPair.getPublic().getEncoded()));
+
+            //Derive shared secret from ephemeral private key and receiver public key
+            byte[] sharedSecret = CryptoUtils.deriveSharedSecret(
+                    ephemeralKeyPair.getPrivate(), KeyManager.receiverKeyPair.getPublic());
+            logger.log("[Sender] Shared secret derived (Base64): " + Base64.getEncoder().encodeToString(sharedSecret));
+
+            //Prepare nonce and timestamp
+            byte[] nonce = new byte[12];
             new SecureRandom().nextBytes(nonce);
+            logger.log("[Sender] Nonce generated (Base64): " + Base64.getEncoder().encodeToString(nonce));
+            long timestamp = System.currentTimeMillis();
+            logger.log("[Sender] Timestamp (ms): " + timestamp);
 
-            byte[] encryptedFile = CryptoUtils.encryptAES(fileBytes, KeyManager.symmetricKey, iv);
-            logger.log("[Sender] IV: " + Base64.getEncoder().encodeToString(iv));
-            logger.log("[Sender] Nonce: " + Base64.getEncoder().encodeToString(nonce));
-            logger.log("[Sender] Encrypted File: " + Base64.getEncoder().encodeToString(encryptedFile));
+            //Derive AES key from shared secret + nonce + timestamp
+            SecretKey aesKey = CryptoUtils.deriveAESKey(sharedSecret, nonce, timestamp);
+            logger.log("[Sender] AES key derived (Base64): " + Base64.getEncoder().encodeToString(aesKey.getEncoded()));
 
-            byte[] encryptedSymKey = CryptoUtils.encryptRSA(KeyManager.symmetricKey.getEncoded(), KeyManager.receiverKeyPair.getPublic());
-            logger.log("[Sender] Encrypted AES Key: " + Base64.getEncoder().encodeToString(encryptedSymKey));
+            //Prepare plaintext payload: filename + file content
+            byte[] fileBytes = Files.readAllBytes(inputFile.toPath());
+            logger.log("[Sender] Read file '" + inputFile.getName() + "' of size " + fileBytes.length + " bytes.");
 
-            // Create metadata + content block for signing
-            ByteArrayOutputStream metaOut = new ByteArrayOutputStream();
-            metaOut.write(inputFile.getName().getBytes());
-            metaOut.write(iv);
-            metaOut.write(nonce);
-            metaOut.write(fileBytes);
-            byte[] metaDataContent = metaOut.toByteArray();
+            ByteArrayOutputStream payloadStream = new ByteArrayOutputStream();
+            DataOutputStream payloadDos = new DataOutputStream(payloadStream);
+            payloadDos.writeUTF(inputFile.getName());
+            payloadDos.writeInt(fileBytes.length);
+            payloadDos.write(fileBytes);
+            byte[] plaintextPayload = payloadStream.toByteArray();
 
-            byte[] fileHash = CryptoUtils.computeHash(metaDataContent);
-            logger.log("[Sender] SHA-256 Hash (Base64): " + Base64.getEncoder().encodeToString(fileHash));
-            logger.log("[Sender] SHA-256 Hash (Hex): " + CryptoUtils.bytesToHex(fileHash));
+            logger.log("[Sender] Payload prepared (size: " + plaintextPayload.length + " bytes).");
 
-            byte[] sig = CryptoUtils.signHash(fileHash, KeyManager.senderKeyPair.getPrivate());
-            logger.log("[Sender] Digital Signature: " + Base64.getEncoder().encodeToString(sig));
+            // Encrypt with AES-GCM
+            byte[] iv = new byte[12];
+            new SecureRandom().nextBytes(iv);
+            logger.log("[Sender] IV generated for AES-GCM (Base64): " + Base64.getEncoder().encodeToString(iv));
 
-            // Send metadata and encrypted data
-            dos.writeUTF(inputFile.getName());
-            dos.writeInt(iv.length); dos.write(iv);
-            dos.writeInt(nonce.length); dos.write(nonce);
-            dos.writeInt(encryptedFile.length); dos.write(encryptedFile);
-            dos.writeInt(encryptedSymKey.length); dos.write(encryptedSymKey);
-            dos.writeInt(sig.length); dos.write(sig);
+            byte[] encryptedPayload = CryptoUtils.encryptAESGCM(plaintextPayload, aesKey, iv);
+            logger.log("[Sender] Payload encrypted (size: " + encryptedPayload.length + " bytes).");
 
-            logger.log("[Sender] File sent successfully.");
+            //Compose data to be signed: ephemeralPubKey + nonce + timestamp + iv + encryptedPayload
+            byte[] ephemeralPubKeyBytes = ephemeralKeyPair.getPublic().getEncoded();
+
+            ByteArrayOutputStream signStream = new ByteArrayOutputStream();
+            DataOutputStream signDos = new DataOutputStream(signStream);
+
+            signDos.writeInt(ephemeralPubKeyBytes.length);
+            signDos.write(ephemeralPubKeyBytes);
+
+            signDos.writeInt(nonce.length);
+            signDos.write(nonce);
+
+            signDos.writeLong(timestamp);
+
+            signDos.writeInt(iv.length);
+            signDos.write(iv);
+
+            signDos.writeInt(encryptedPayload.length);
+            signDos.write(encryptedPayload);
+
+            byte[] dataToSign = signStream.toByteArray();
+
+            logger.log("[Sender] Data to sign composed (size: " + dataToSign.length + " bytes).");
+
+            //Sign the data using sender's private key
+            byte[] signature = CryptoUtils.signData(dataToSign, KeyManager.senderKeyPair.getPrivate());
+            logger.log("[Sender] Data signed (signature Base64): " + Base64.getEncoder().encodeToString(signature));
+
+            // Send all data in order
+            dos.writeInt(ephemeralPubKeyBytes.length);
+            dos.write(ephemeralPubKeyBytes);
+
+            dos.writeInt(nonce.length);
+            dos.write(nonce);
+
+            dos.writeLong(timestamp);
+
+            dos.writeInt(iv.length);
+            dos.write(iv);
+
+            dos.writeInt(encryptedPayload.length);
+            dos.write(encryptedPayload);
+
+            dos.writeInt(signature.length);
+            dos.write(signature);
+
+            logger.log("[Sender] File sent with forward secrecy, AEAD, and signed metadata.");
+
         } catch (Exception e) {
             logger.log("[Sender] Error: " + e.getMessage());
+            e.printStackTrace();
         }
     }
 }
