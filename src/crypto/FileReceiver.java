@@ -29,20 +29,19 @@ public class FileReceiver {
                     receivedFileName = fileName;
                     logger.log("[Receiver] File name: " + fileName);
 
-                    byte[] iv = new byte[dis.readInt()];
-                    dis.readFully(iv);
+                    byte[] iv = new byte[dis.readInt()]; dis.readFully(iv);
                     logger.log("[Receiver] IV: " + Base64.getEncoder().encodeToString(iv));
 
-                    byte[] encryptedFile = new byte[dis.readInt()];
-                    dis.readFully(encryptedFile);
+                    byte[] nonce = new byte[dis.readInt()]; dis.readFully(nonce);
+                    logger.log("[Receiver] Nonce: " + Base64.getEncoder().encodeToString(nonce));
+
+                    byte[] encryptedFile = new byte[dis.readInt()]; dis.readFully(encryptedFile);
                     logger.log("[Receiver] Encrypted File: " + Base64.getEncoder().encodeToString(encryptedFile));
 
-                    byte[] encryptedKey = new byte[dis.readInt()];
-                    dis.readFully(encryptedKey);
+                    byte[] encryptedKey = new byte[dis.readInt()]; dis.readFully(encryptedKey);
                     logger.log("[Receiver] Encrypted AES Key: " + Base64.getEncoder().encodeToString(encryptedKey));
 
-                    byte[] sig = new byte[dis.readInt()];
-                    dis.readFully(sig);
+                    byte[] sig = new byte[dis.readInt()]; dis.readFully(sig);
                     logger.log("[Receiver] Digital Signature: " + Base64.getEncoder().encodeToString(sig));
 
                     byte[] aesBytes = CryptoUtils.decryptRSA(encryptedKey, KeyManager.receiverKeyPair.getPrivate());
@@ -52,14 +51,21 @@ public class FileReceiver {
                     byte[] decryptedFile = CryptoUtils.decryptAES(encryptedFile, decryptedKey, iv);
                     logger.log("[Receiver] Decrypted File (Base64): " + Base64.getEncoder().encodeToString(decryptedFile));
 
-                    byte[] hash = CryptoUtils.computeHash(decryptedFile);
+                    // Build metadata + content to verify signature
+                    ByteArrayOutputStream metaOut = new ByteArrayOutputStream();
+                    metaOut.write(fileName.getBytes());
+                    metaOut.write(iv);
+                    metaOut.write(nonce);
+                    metaOut.write(decryptedFile);
+                    byte[] metaDataContent = metaOut.toByteArray();
+
+                    byte[] hash = CryptoUtils.computeHash(metaDataContent);
                     logger.log("[Receiver] SHA-256 Hash (Base64): " + Base64.getEncoder().encodeToString(hash));
                     logger.log("[Receiver] SHA-256 Hash (Hex): " + CryptoUtils.bytesToHex(hash));
 
                     boolean ok = CryptoUtils.verifySignature(hash, sig, KeyManager.senderKeyPair.getPublic());
                     if (ok) {
                         logger.log("[Receiver] Signature verified.");
-                        // Save to a temp file using original file name
                         tempDecryptedFile = new File("temp_" + fileName);
                         Files.write(tempDecryptedFile.toPath(), decryptedFile);
                         enableSaveButton.run();
