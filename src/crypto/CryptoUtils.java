@@ -1,5 +1,4 @@
-package crypto;// Add ECDH key pair generation, key agreement & AES-GCM encrypt/decrypt
-
+package crypto;
 import javax.crypto.*;
 import javax.crypto.spec.*;
 import java.security.*;
